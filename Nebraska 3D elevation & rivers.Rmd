@@ -1,0 +1,142 @@
+---
+title: "3D Elevation and river map of Nebraska"
+author: "Raymond Asamoah"
+date: "2025-07-16"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+# ───────────────────────────────────────────────────────────────
+# 1. INSTALL AND LOAD REQUIRED PACKAGES
+# ───────────────────────────────────────────────────────────────
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  terra,
+  elevatr,
+  sf,
+  geodata,
+  tidyverse,
+  rayshader
+)
+
+# ───────────────────────────────────────────────────────────────
+# 2. LOAD NEBRASKA STATE BOUNDARY
+# ───────────────────────────────────────────────────────────────
+path <- getwd()
+
+# Download USA state boundaries and filter for Nebraska
+usa_sf <- geodata::gadm(country = "USA", level = 1, path = path) |> sf::st_as_sf()
+nebraska_sf <- usa_sf |> filter(NAME_1 == "Nebraska")
+
+# ───────────────────────────────────────────────────────────────
+# 3. DOWNLOAD AND LOAD HYDRORIVERS FOR NORTH AMERICA
+# ───────────────────────────────────────────────────────────────
+url <- "https://data.hydrosheds.org/file/HydroRIVERS/HydroRIVERS_v10_na_shp.zip"
+destfile <- basename(url)
+download.file(url, destfile, mode = "wb")
+unzip(destfile)
+
+# Find the shapefile
+filename <- list.files("HydroRIVERS_v10_na_shp", pattern = ".shp$", full.names = TRUE)
+
+# Get bounding box for Nebraska
+bbox <- sf::st_bbox(nebraska_sf)
+bbox_wkt <- sprintf("POLYGON((%f %f, %f %f, %f %f, %f %f, %f %f))",
+  bbox["xmin"], bbox["ymin"],
+  bbox["xmin"], bbox["ymax"],
+  bbox["xmax"], bbox["ymax"],
+  bbox["xmax"], bbox["ymin"],
+  bbox["xmin"], bbox["ymin"]
+)
+
+# Read and clip river shapefile to Nebraska boundary
+nebraska_rivers <- sf::st_read(filename, wkt_filter = bbox_wkt, quiet = TRUE) |>
+  sf::st_intersection(nebraska_sf)
+
+# ───────────────────────────────────────────────────────────────
+# 4. ADD WIDTHS BASED ON RIVER FLOW ORDER
+# ───────────────────────────────────────────────────────────────
+nebraska_rivers$width <- dplyr::case_when(
+  nebraska_rivers$ORD_FLOW == 3 ~ 16,
+  nebraska_rivers$ORD_FLOW == 4 ~ 14,
+  nebraska_rivers$ORD_FLOW == 5 ~ 12,
+  nebraska_rivers$ORD_FLOW == 6 ~ 10,
+  nebraska_rivers$ORD_FLOW == 7 ~ 6,
+  TRUE ~ 2
+)
+
+# Project to suitable UTM zone for Nebraska
+crs_nebraska <- "EPSG:26914"  # NAD83 / UTM zone 14N
+nebraska_river_width <- nebraska_rivers |> sf::st_transform(crs = crs_nebraska)
+
+# ───────────────────────────────────────────────────────────────
+# 5. DOWNLOAD ELEVATION DATA FOR NEBRASKA
+# ───────────────────────────────────────────────────────────────
+dem <- elevatr::get_elev_raster(
+  locations = nebraska_sf,
+  z = 7,
+  clip = "locations"
+)
+
+dem_nebraska <- terra::rast(dem) |> terra::project(crs_nebraska)
+
+# Convert DEM to matrix for rayshader
+dem_matrix <- rayshader::raster_to_matrix(dem_nebraska)
+
+# ───────────────────────────────────────────────────────────────
+# 6. 3D VISUALIZATION WITH RAYSHADER
+# ───────────────────────────────────────────────────────────────
+dem_matrix |>
+  rayshader::height_shade(
+    texture = colorRampPalette(c("#f7e7c6", "#c67847"))(128)
+  ) |>
+  rayshader::add_overlay(
+    rayshader::generate_line_overlay(
+      geometry = nebraska_river_width,
+      extent = dem_nebraska,
+      heightmap = dem_matrix,
+      color = "#387B9C",
+      linewidth = nebraska_river_width$width,
+      data_column_width = "width"
+    ), alphalayer = 1
+  ) |>
+  rayshader::plot_3d(
+    heightmap = dem_matrix,
+    zscale = 20,
+    solid = FALSE,
+    shadow = TRUE,
+    shadow_darkness = 1,
+    background = "white",
+    windowsize = c(700, 700),
+    zoom = 0.55,
+    phi = 89,
+    theta = 0
+  )
+
+# Adjust camera if needed
+rayshader::render_camera(zoom = 0.75)
+
+# ───────────────────────────────────────────────────────────────
+# 7. HIGH-QUALITY RENDER WITH HDRI LIGHTING
+# ───────────────────────────────────────────────────────────────
+hdri_url <- "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/photo_studio_loft_hall_4k.hdr"
+hdri_file <- basename(hdri_url)
+download.file(hdri_url, hdri_file, mode = "wb")
+
+output_file <- "nebraska_3d_elevation_rivers.png"
+
+rayshader::render_highquality(
+  filename = output_file,
+  preview = TRUE,
+  light = FALSE,
+  environment_light = hdri_file,
+  intensity_env = 1,
+  interactive = FALSE,
+  width = 3000,
+  height = 3000
+)
+```
+
